@@ -28,7 +28,7 @@ parser = argparse.ArgumentParser(description='FairCLIP Training/Fine-Tuning')
 
 parser.add_argument('--seed', default=-1, type=int,
                     help='seed for initializing training. ')
-parser.add_argument('--num_epochs', default=1, type=int)
+parser.add_argument('--num_epochs', default=90, type=int)
 parser.add_argument('--lr', '--learning-rate', default=5e-3, type=float,
                     metavar='LR', help='initial learning rate', dest='lr')
 parser.add_argument('--momentum', default=0.9, type=float, metavar='M',
@@ -40,11 +40,11 @@ parser.add_argument('--wd', '--weight-decay', default=6e-5, type=float,
 parser.add_argument('--result_dir', default='./results/results', type=str)
 parser.add_argument('--dataset_dir', default='/root/data/fairvlmed10k', type=str)
 # parser.add_argument('--dataset_dir', default='/H_share/data/fairvlmed10k', type=str)
-parser.add_argument('--batch_size', default=32, type=int)
+parser.add_argument('--batch_size', default=16, type=int)
 parser.add_argument('--workers', default=12, type=int)
 parser.add_argument('--eval_set', default='test', type=str, help='options: val | test')
 # parser.add_argument('--summarized_note_file', default='/H_share/data/fairvlmed10k/gpt-4_summarized_notes.csv', type=str)
-parser.add_argument('--summarized_note_file', default='/root/data/fairvlmed10k/gpt-4_summarized_notes.csv',
+parser.add_argument('--summarized_note_file', default='/root/data/fairvlmed10k/data_summary_all.csv',
                     type=str)
 parser.add_argument('--text_source', default='note', type=str, help='options: note | label')
 parser.add_argument('--perf_file', default='', type=str)
@@ -92,6 +92,7 @@ if __name__ == '__main__':
             esauc_head_str += ', '.join([f'esauc_attr{x}' for x in range(len(groups_in_attrs))]) + ', '
 
             group_disparity_head_str += ', '.join([f'std_group_disparity_attr{x}, max_group_disparity_attr{x}' for x in range(len(groups_in_attrs))]) + ', '
+             
             
             with open(best_global_perf_file, 'w') as f:
                 f.write(f'epoch, acc, {esacc_head_str} auc, {esauc_head_str} {auc_head_str} {dpd_head_str} {eod_head_str} {group_disparity_head_str} path\n')
@@ -113,6 +114,12 @@ if __name__ == '__main__':
         num_features = model.classifier[1].in_features
         num_classes = 1  # 假设是二分类任务
         model.classifier[1] = nn.Linear(num_features, num_classes)
+    
+    elif args.model_arch == 'resnet18':
+        model = models.resnet18(weights=None)
+        num_features = model.fc.in_features
+        num_classes = 1  # 假设是二分类任务
+        model.fc = nn.Linear(num_features, num_classes)
     else:
         raise ValueError(f"暂不支持的模型架构: {args.model_arch}")
     
@@ -138,15 +145,15 @@ if __name__ == '__main__':
         transforms.Normalize(mean=[0.5], std=[0.5]),
     ])
 
-    train_dataset = fair_vl_med_dataset(args,args.dataset_dir, transform_train,use_gen_data=args.use_gen_data, subset='Training', text_source=args.text_source, summarized_note_file=args.summarized_note_file,files=train_files)
+    train_dataset = fair_vl_med_dataset(args,args.dataset_dir, transform_train,use_gen_data=args.use_gen_data, subset='training', text_source=args.text_source, summarized_note_file=args.summarized_note_file,files=train_files)
     train_dataloader = DataLoader(train_dataset, batch_size=args.batch_size, shuffle=True,
-        num_workers=args.workers, pin_memory=True, drop_last=False)
+        num_workers=args.workers, pin_memory=True, drop_last=False,)
 
-    val_dataset = fair_vl_med_dataset(args,args.dataset_dir, transform_test, subset='Validation')
+    val_dataset = fair_vl_med_dataset(args,args.dataset_dir, transform_test, summarized_note_file=args.summarized_note_file, subset='validation')
     val_dataloader = DataLoader(val_dataset, batch_size=args.batch_size, shuffle=False,
         num_workers=args.workers, pin_memory=True, drop_last=False)
 
-    test_dataset = fair_vl_med_dataset(args,args.dataset_dir, transform_test, subset='Test')
+    test_dataset = fair_vl_med_dataset(args,args.dataset_dir, transform_test, summarized_note_file=args.summarized_note_file, subset='test')
     test_dataloader = DataLoader(test_dataset, batch_size=args.batch_size, shuffle=False,
         num_workers=args.workers, pin_memory=True, drop_last=False)
 
@@ -210,7 +217,7 @@ if __name__ == '__main__':
 
 
             avg_loss += loss.item()
-            break
+            
 
 
         avg_loss /= len(train_dataloader)
@@ -229,7 +236,9 @@ if __name__ == '__main__':
             if loader == test_dataloader:
                 logger.log(
                     f'==== test =====')
-                model.load_state_dict(torch.load(os.path.join(args.result_dir, f"best.pth"))['model_state_dict'])
+                
+                model.load_state_dict(torch.load(os.path.join(args.result_dir, f"best.pth"), weights_only=False)['model_state_dict'])
+
             for batch in loader :
                 images,_, label_and_attributes,glaucoma_label,_ = batch
 
@@ -262,18 +271,18 @@ if __name__ == '__main__':
 
             logger.log(f'===> epoch[{epoch:03d}/{args.num_epochs:03d}], training loss: {avg_loss:.4f}, eval loss: {eval_avg_loss:.4f}')
 
-            overall_acc, eval_es_acc, overall_auc, eval_es_auc, eval_aucs_by_attrs, eval_dpds, eval_eods, between_group_disparity = evalute_comprehensive_perf(all_probs, all_labels, all_attrs.T)
+            eval_overall_acc, eval_esaccs_by_attrs, eval_overall_auc, eval_esaucs_by_attrs, eval_aucs_by_attrs, eval_dpds, eval_eods, eval_between_group_disparity,eval_specificity,eval_sensitivity,eval_f1,eval_precision = evalute_comprehensive_perf(all_probs, all_labels, all_attrs.T)
 
-            if best_auc <= overall_auc:
-                best_auc = overall_auc
-                best_acc = overall_acc
+            if best_auc <= eval_overall_auc:
+                best_auc = eval_overall_auc
+                best_acc = eval_overall_acc
                 best_ep = epoch
                 best_auc_groups = eval_aucs_by_attrs
                 best_dpd_groups = eval_dpds
                 best_eod_groups = eval_eods
-                best_es_acc = eval_es_acc
-                best_es_auc = eval_es_auc
-                best_between_group_disparity = between_group_disparity
+                best_es_acc = eval_esaccs_by_attrs
+                best_es_auc = eval_esaucs_by_attrs
+                best_between_group_disparity = eval_between_group_disparity
 
                 torch.save({
                     'epoch': epoch,
@@ -319,20 +328,20 @@ if __name__ == '__main__':
             logger.logkv('trn_loss', round(avg_loss,4))
 
             logger.logkv('eval_loss', round(eval_avg_loss,4))
-            logger.logkv('eval_acc', round(overall_acc,4))
-            logger.logkv('eval_auc', round(overall_auc,4))
+            logger.logkv('eval_acc', round(eval_overall_acc,4))
+            logger.logkv('eval_auc', round(eval_overall_auc,4))
 
-            for ii in range(len(eval_es_acc)):
-                logger.logkv(f'eval_es_acc_attr{ii}', round(eval_es_acc[ii],4))
-            for ii in range(len(eval_es_auc)):
-                logger.logkv(f'eval_es_auc_attr{ii}', round(eval_es_auc[ii],4))
+            for ii in range(len(eval_esaccs_by_attrs)):
+                logger.logkv(f'eval_es_acc_attr{ii}', round(eval_esaccs_by_attrs[ii],4))
+            for ii in range(len(eval_esaucs_by_attrs)):
+                logger.logkv(f'eval_es_auc_attr{ii}', round(eval_esaucs_by_attrs[ii],4))
             for ii in range(len(eval_aucs_by_attrs)):
                 for iii in range(len(eval_aucs_by_attrs[ii])):
                     logger.logkv(f'eval_auc_attr{ii}_group{iii}', round(eval_aucs_by_attrs[ii][iii],4))
 
-            for ii in range(len(between_group_disparity)):
-                logger.logkv(f'eval_auc_attr{ii}_std_group_disparity', round(between_group_disparity[ii][0],4))
-                logger.logkv(f'eval_auc_attr{ii}_max_group_disparity', round(between_group_disparity[ii][1],4))
+            for ii in range(len(eval_between_group_disparity)):
+                logger.logkv(f'eval_auc_attr{ii}_std_group_disparity', round(eval_between_group_disparity[ii][0],4))
+                logger.logkv(f'eval_auc_attr{ii}_max_group_disparity', round(eval_between_group_disparity[ii][1],4))
 
             for ii in range(len(eval_dpds)):
                 logger.logkv(f'eval_dpd_attr{ii}', round(eval_dpds[ii],4))

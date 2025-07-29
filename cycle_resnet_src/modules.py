@@ -82,10 +82,10 @@ def count_number_of_groups(input_dataset):
 
 
 class fair_vl_med_dataset(torch.utils.data.Dataset):
-    def __init__(self, args,dataset_dir='', preprocess=None,use_gen_data=False, files=None, subset='Training', text_source='note', summarized_note_file=None, ruleout_unknown=False):
+    def __init__(self, args,dataset_dir='', preprocess=None,use_gen_data=False, files=None, subset='training', text_source='note', summarized_note_file=None, ruleout_unknown=False):
         self.use_gen_data = use_gen_data
         self.preprocess = preprocess
-        self.dataset_dir = os.path.join(dataset_dir, subset)
+        self.dataset_dir = os.path.join(dataset_dir, "All")
         self.subset = subset
         self.text_source = text_source
         self.ruleout_unknown = ruleout_unknown
@@ -93,16 +93,21 @@ class fair_vl_med_dataset(torch.utils.data.Dataset):
         self.summarized_notes = {}
         # summarized_note_file is a csv file that contains the summarized notes associated with npz files
         # read the summarized notes from the csv file and construct a dictionary
-        if self.subset == 'Training' and self.text_source == 'note' and summarized_note_file != '':
+
+        # 读取summarized_note_file时，记录每个文件属于train/val/test
+        file_to_use = {}
+        if self.text_source == 'note' and summarized_note_file != '':
             df = pd.read_csv(os.path.join(dataset_dir, summarized_note_file))
-            
             for index, row in df.iterrows():
-                self.summarized_notes[row.iloc[0].strip()] = row.iloc[2].strip()
-        
-        # check if the split file exists
-        if files is not None and subset=='Training':
+                self.summarized_notes[row.iloc[0].strip()] = row.iloc[8].strip()
+                # 记录use列（文件属于train/val/test）
+                file_to_use[row.iloc[0].strip()] = row['use'] if 'use' in df.columns else None
+
+        self.files = []
+        if files is not None and subset=='training':
             print(f"use {files}")
             files = os.path.join(dataset_dir, files)
+                    # check if the split file exists
             with open(files,'r',encoding='utf-8') as f:
                 filter = f.read()
                 filter = filter.split('\n')
@@ -112,9 +117,11 @@ class fair_vl_med_dataset(torch.utils.data.Dataset):
             files = {os.path.basename(i): i for i in files}
             filter_files = set(filter) & set(basename_files)
             for k,v in list(files.items()):
-                if k not in filter_files:
-                    del files[k]
-            self.files = list(files.values())
+                if k  in filter_files and file_to_use[k] == subset:
+                    self.files.append(v)
+
+
+
 
             # 额外添加sd_gen数据
             li = glob(os.path.join(args.result_dir, "sd_gen*", "*generate*"))
@@ -151,10 +158,14 @@ class fair_vl_med_dataset(torch.utils.data.Dataset):
         else:
             # df = pd.read_csv(os.path.join(dataset_dir, 'split_files.csv'))
             # self.files = df[df['file_type'] == subset]['filename'].tolist()
+            
             self.files = find_all_files(self.dataset_dir, suffix='npz')
+            self.files = [i for i in self.files if file_to_use[os.path.basename(i)] == subset]
+
+
 
         # iterate through the files and remove the ones that has unknown attributes (-1)
-        if subset != 'Training' or self.ruleout_unknown:
+        if subset != 'training' or self.ruleout_unknown:
             tmp_files = []
             for file in self.files:
                 npz_path = os.path.join(self.dataset_dir, file)
@@ -175,7 +186,7 @@ class fair_vl_med_dataset(torch.utils.data.Dataset):
             print(npz_path)
         slo_fundus = self.preprocess(Image.fromarray(slo_fundus).convert('RGB'))
 
-        if self.subset == 'Training':
+        if self.subset == 'training':
             if self.text_source == 'note':
 
                 note = self.summarized_notes[os.path.basename(self.files[idx])].strip()
