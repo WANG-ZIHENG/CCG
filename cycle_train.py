@@ -52,7 +52,7 @@ parser = argparse.ArgumentParser(description='FairCLIP Training/Fine-Tuning')
 
 parser.add_argument('--seed', default=-1, type=int,
                     help='seed for initializing training. ')
-parser.add_argument('--num_epochs', default=90, type=int)
+parser.add_argument('--num_epochs', default=1, type=int)
 parser.add_argument('--lr', '--learning-rate', default=1e-5, type=float,
                     metavar='LR', help='initial learning rate', dest='lr')
 parser.add_argument('--momentum', default=0.9, type=float, metavar='M',
@@ -61,7 +61,7 @@ parser.add_argument('--wd', '--weight-decay', default=6e-5, type=float,
                     metavar='W', help='weight decay (default: 6e-5)',
                     dest='weight_decay')
 
-parser.add_argument('--result_dir', default='./output/results', type=str)
+parser.add_argument('--result_dir', default='/root/cloud/ziheng/output/results', type=str)
 parser.add_argument('--dataset_dir', default='/root/data/fairvlmed10k', type=str)
 # parser.add_argument('--dataset_dir', default='/H_share/data/fairvlmed10k', type=str)
 parser.add_argument('--batch_size', default=8, type=int)
@@ -69,12 +69,11 @@ parser.add_argument('--workers', default=8, type=int)
 parser.add_argument('--eval_set', default='test', type=str, help='options: val | test')
 # parser.add_argument('--summarized_note_file', default='/H_share/data/fairvlmed10k/gpt-4_summarized_notes.csv',
 #                     type=str)
-parser.add_argument('--summarized_note_file', default='/root/data/fairvlmed10k/gpt-4_summarized_notes.csv',
-                    type=str)
+parser.add_argument('--summarized_note_file', default='/root/data/fairvlmed10k/data_summary_all.csv')
 parser.add_argument('--text_source', default='note', type=str, help='options: note | label')
 parser.add_argument('--perf_file', default='', type=str)
-# parser.add_argument('--model_arch', default='vit-b16', type=str, help='options: vit-b16 | vit-l14')
-parser.add_argument('--pretrained_weights', default='models/resnet18_0.7822_pretrain.pth', type=str)
+parser.add_argument('--model_arch', default='efficientnet_b4', type=str, help='options: efficientnet_b0 | efficientnet_b1 | efficientnet_b2 | efficientnet_b3 | efficientnet_b4 | efficientnet_b5 | efficientnet_b6 | efficientnet_b7')
+parser.add_argument('--pretrained_weights', default='models/efficientnet_b4_pretrain_0.7375.pth', type=str)
 parser.add_argument('--mode', type=str,default='confidence', choices=['confidence', 'uncertainty','both'], help='Select confidence or uncertainty or both')
 parser.add_argument('--use_gen_data', default=True, type=bool)
 
@@ -140,12 +139,32 @@ def train_resnet(args,global_epoch,metrics):
                     f'epoch, acc, {esacc_head_str} auc, {esauc_head_str} {auc_head_str} {dpd_head_str} {eod_head_str} {group_disparity_head_str} path\n')
 
     device = "cuda:0" if torch.cuda.is_available() else "cpu"  # If using GPU then use mixed precision training.
-    model = models.resnet18(pretrained=False)
-    # model = models.resnet152(pretrained=False)
-    num_features = model.fc.in_features
-    # 将最后一层替换为适合你的分类任务的新全连接层
-    num_classes = 1  # 假设你有 10 个类别
-    model.fc = nn.Linear(num_features, num_classes)
+    # 根据args.model_arch选择efficientnet架构
+    efficientnet_archs = {
+        'efficientnet_b0': models.efficientnet_b0,
+        'efficientnet_b1': models.efficientnet_b1,
+        'efficientnet_b2': models.efficientnet_b2,
+        'efficientnet_b3': models.efficientnet_b3,
+        'efficientnet_b4': models.efficientnet_b4,
+        'efficientnet_b5': models.efficientnet_b5,
+        'efficientnet_b6': models.efficientnet_b6,
+        'efficientnet_b7': models.efficientnet_b7,
+    }
+    if args.model_arch in efficientnet_archs:
+        model = efficientnet_archs[args.model_arch](weights=None)
+        num_features = model.classifier[1].in_features
+        num_classes = 1  # 假设是二分类任务
+        model.classifier[1] = nn.Linear(num_features, num_classes)
+    
+    elif args.model_arch == 'resnet18':
+        model = models.resnet18(weights=None)
+        num_features = model.fc.in_features
+        num_classes = 1  # 假设是二分类任务
+        model.fc = nn.Linear(num_features, num_classes)
+    else:
+        raise ValueError(f"暂不支持的模型架构: {args.model_arch}")
+
+
     model = model.to(device)
     # if global_epoch == 0:
     #     checkpoint = torch.load(args.pretrained_weights)
@@ -154,7 +173,7 @@ def train_resnet(args,global_epoch,metrics):
     # else:
     #     ckpt_path = os.path.join(args.result_dir,"last.pth")
     #     checkpoint = torch.load(ckpt_path)
-    checkpoint = torch.load(args.pretrained_weights)
+    checkpoint = torch.load(args.pretrained_weights,weights_only=False)
 
     train_files = 'filter_file.txt'
     test_files = None
@@ -177,16 +196,16 @@ def train_resnet(args,global_epoch,metrics):
     ])
 
     train_dataset = fair_vl_med_dataset(args,args.dataset_dir, transform_train, use_gen_data=args.use_gen_data,
-                                        subset='Training', text_source=args.text_source,
+                                        subset='training', text_source=args.text_source,
                                         summarized_note_file=args.summarized_note_file, files=train_files)
     train_dataloader = DataLoader(train_dataset, batch_size=args.batch_size, shuffle=True,
                                   num_workers=args.workers, pin_memory=True, drop_last=True)
 
-    val_dataset = fair_vl_med_dataset(args,args.dataset_dir, transform_test, subset='Validation')
+    val_dataset = fair_vl_med_dataset(args,args.dataset_dir, transform_test, summarized_note_file=args.summarized_note_file, subset='validation')
     val_dataloader = DataLoader(val_dataset, batch_size=args.batch_size, shuffle=False,
                                 num_workers=args.workers, pin_memory=True, drop_last=False)
 
-    test_dataset = fair_vl_med_dataset(args,args.dataset_dir, transform_test, subset='Test')
+    test_dataset = fair_vl_med_dataset(args,args.dataset_dir, transform_test, summarized_note_file=args.summarized_note_file, subset='test')
     test_dataloader = DataLoader(test_dataset, batch_size=args.batch_size, shuffle=False,
                                  num_workers=args.workers, pin_memory=True, drop_last=False)
 
@@ -216,11 +235,22 @@ def train_resnet(args,global_epoch,metrics):
     best_es_acc = checkpoint['best_es_acc']
     best_es_auc = checkpoint['best_es_auc']
     best_between_group_disparity = checkpoint['best_between_group_disparity']
-    best_specificity= checkpoint['best_specificity']
-    best_sensitivity= checkpoint['best_sensitivity']
-    best_f1= checkpoint['best_f1']
-    best_precision= checkpoint['best_precision']
-
+    if 'best_specificity' in checkpoint:
+        best_specificity= checkpoint['best_specificity']
+    else:
+        best_specificity = -1
+    if 'best_sensitivity' in checkpoint:
+        best_sensitivity= checkpoint['best_sensitivity']
+    else:
+        best_sensitivity = -1
+    if 'best_f1' in checkpoint:
+        best_f1= checkpoint['best_f1']
+    else:
+        best_f1 = -1
+    if 'best_precision' in checkpoint:
+        best_precision= checkpoint['best_precision']
+    else:
+        best_precision = -1
 
 
     start_epoch = 0
@@ -334,6 +364,15 @@ def train_resnet(args,global_epoch,metrics):
 
             overall_acc, eval_es_acc, overall_auc, eval_es_auc, eval_aucs_by_attrs, eval_dpds, eval_eods, between_group_disparity,specificity,sensitivity,f1,precision = evalute_comprehensive_perf(
                 all_probs, all_labels, all_attrs.T)
+
+            if best_specificity == -1:
+                best_specificity = specificity
+            if best_sensitivity == -1:
+                best_sensitivity = sensitivity
+            if best_f1 == -1:
+                best_f1 = f1
+            if best_precision == -1:
+                best_precision = precision
 
             if best_auc <= overall_auc:
                 best_auc = overall_auc
@@ -599,12 +638,11 @@ def train_control(args,global_epoch,topn_file,created_model):
     model.only_mid_control = only_mid_control
 
     if global_epoch == 0:
-        ckpt_path = "lightning_logs/version_11/checkpoints/epoch=1-step=7021.ckpt"
+        ckpt_path = ""
+        now_epoch = 0
     else:
         ckpt_path = get_last_lightning_cpkpt(args.result_dir)
-
-
-    now_epoch = int(re.findall('epoch=(\d+)',ckpt_path)[0])
+        now_epoch = int(re.findall('epoch=(\d+)',ckpt_path)[0])
     max_epoch = now_epoch + finetune_epoch+1
 
 
@@ -752,7 +790,7 @@ if __name__ == '__main__':
     resume = False
     if resume:
         args.seed = 87620
-        args.result_dir = f'cycle-{args.mode}-resnet18-seed{args.seed}_resnet永远加载预训练模型'
+        args.result_dir = f'/root/cloud/ziheng/cycle-{args.mode}-{args.model_arch}-seed{args.seed}_{args.model_arch}永远加载预训练模型'
         if not os.path.exists(args.result_dir):
             global_epoch = 0
         else:
@@ -761,14 +799,14 @@ if __name__ == '__main__':
         global_epoch = 0
         if args.seed < 0:
             args.seed = int(np.random.randint(100000, size=1)[0])
-        args.result_dir = f'{date_string}-cycle-{args.mode}-resnet18-seed{args.seed}_resnet永远加载预训练模型'
+        args.result_dir = f'/root/cloud/ziheng/{date_string}-cycle-{args.mode}-{args.model_arch}-seed{args.seed}_{args.model_arch}永远加载预训练模型'
         logger.log(f'===> random seed: {args.seed}')
         logger.configure(dir=args.result_dir, log_suffix=f'train-global{global_epoch}')
         with open(os.path.join(args.result_dir, f'args_train.txt'), 'w') as f:
             json.dump(args.__dict__, f, indent=2)
     created_model = create_model('./models/cldm_v21.yaml').cpu()
     wandb.init(dir=os.path.join(args.result_dir,'wandb'), project="cycle_train",
-               name=args.result_dir, config=args, job_type=f'train', entity="ziheng-wang")
+               name=args.result_dir, config=args, job_type=f'train', entity="ziheng-wang",mode='offline')
     m2, s2 = None, None
     while True:
         metrics = {}

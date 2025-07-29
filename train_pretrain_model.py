@@ -372,8 +372,8 @@ if __name__ == '__main__':
                 f.write(f'{best_ep}, {best_acc:.4f}, {esacc_head_str} {best_auc:.4f}, {esauc_head_str} {auc_head_str} {dpd_head_str} {eod_head_str} {group_disparity_str} {path_str}\n')
 
     if args.use_gen_data:
-        output_name = f'{args.model_arch}使用生成数据-seed{args.seed}_auc{best_auc:.4f}'
+        output_name = f'results/{args.model_arch}使用生成数据-seed{args.seed}_auc{best_auc:.4f}'
     else:
-        output_name = f'{args.model_arch}不使用生成数据-seed{args.seed}_auc{best_auc:.4f}'
+        output_name = f'results/{args.model_arch}不使用生成数据-seed{args.seed}_auc{best_auc:.4f}'
     print(output_name)
     os.rename(args.result_dir, output_name)

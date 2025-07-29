@@ -20,7 +20,7 @@ class MyDataset(Dataset):
     def __init__(self,args,gen_data = False,file_list = None):
         self.data = []
         
-        summary = os.path.join(args.dataset_dir, 'data_summary.csv')
+        summary = os.path.join(args.dataset_dir, 'data_summary_all.csv')
         self.summary_data = pd.read_csv(summary).set_index('filename')
         self.gen_data = gen_data
         self.mask_file = os.path.join(args.dataset_dir,'mask')
@@ -63,8 +63,9 @@ class MyDataset(Dataset):
             clahe_img[:, :, i] = self.clahe.apply(modified_image[:, :, i])
         # mask
         mask_file = os.path.basename(data_file).replace(".npz",".png")
+        mask_file = mask_file.split(".")[0]
+        mask_file = mask_file + "_predict.png"
         mask_file = os.path.join(self.mask_file,mask_file)
-
         mask_image = Image.open(mask_file)
         mask_image = mask_image.convert('RGB')
         mask_image = np.array(mask_image)
