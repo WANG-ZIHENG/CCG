@@ -1,0 +1,18 @@
+{
+  "seed": 2609,
+  "num_epochs": 1,
+  "lr": 0.005,
+  "momentum": 0.9,
+  "weight_decay": 6e-05,
+  "result_dir": "./results/results",
+  "dataset_dir": "/root/data/fairvlmed10k",
+  "batch_size": 32,
+  "workers": 12,
+  "eval_set": "test",
+  "summarized_note_file": "/root/data/fairvlmed10k/gpt-4_summarized_notes.csv",
+  "text_source": "note",
+  "perf_file": "",
+  "model_arch": "efficientnet_b4",
+  "pretrained_weights": "",
+  "use_gen_data": false
+}

@@ -1,0 +1,10 @@
+12 vCPU Intel(R) Xeon(R) Platinum 8352V CPU @ 2.10GHz
+DDIM Sampler: 100%|█████████████████████████████| 31/31 [00:17<00:00,  1.81it/s]
+
+
+22 vCPU AMD EPYC 7T83 64-Core Processor
+DDIM Sampler: 100%|█████████████████████████████| 31/31 [00:13<00:00,  2.30it/s]
+
+
+16 vCPU AMD EPYC 9654 96-Core Processor
+DDIM Sampler: 100%|█████████████████████████████| 31/31 [00:12<00:00,  2.50it/s]
