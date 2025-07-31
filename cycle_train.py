@@ -34,8 +34,11 @@ from cldm.logger import ImageLogger
 from cldm.model import create_model, load_state_dict
 import uuid
 import gc
+import lpips
+
 
 from pytorch_fid import fid_score
+from pytorch_msssim import ssim, ms_ssim, SSIM, MS_SSIM
 
 
 #pip install pytorch-fid
@@ -52,7 +55,7 @@ parser = argparse.ArgumentParser(description='FairCLIP Training/Fine-Tuning')
 
 parser.add_argument('--seed', default=-1, type=int,
                     help='seed for initializing training. ')
-parser.add_argument('--num_epochs', default=1, type=int)
+parser.add_argument('--num_epochs', default=30, type=int)
 parser.add_argument('--lr', '--learning-rate', default=1e-5, type=float,
                     metavar='LR', help='initial learning rate', dest='lr')
 parser.add_argument('--momentum', default=0.9, type=float, metavar='M',
@@ -74,6 +77,7 @@ parser.add_argument('--text_source', default='note', type=str, help='options: no
 parser.add_argument('--perf_file', default='', type=str)
 parser.add_argument('--model_arch', default='efficientnet_b4', type=str, help='options: efficientnet_b0 | efficientnet_b1 | efficientnet_b2 | efficientnet_b3 | efficientnet_b4 | efficientnet_b5 | efficientnet_b6 | efficientnet_b7')
 parser.add_argument('--pretrained_weights', default='models/efficientnet_b4_pretrain_0.7375.pth', type=str)
+# parser.add_argument('--pretrained_weights', default='models/temp.pth', type=str)
 parser.add_argument('--mode', type=str,default='confidence', choices=['confidence', 'uncertainty','both'], help='Select confidence or uncertainty or both')
 parser.add_argument('--use_gen_data', default=True, type=bool)
 
@@ -628,11 +632,11 @@ def train_control(args,global_epoch,topn_file,created_model):
     learning_rate = 1e-5
     sd_locked = False
     only_mid_control = False
-    finetune_epoch = 3
+    finetune_epoch = 1
 
     # First use cpu to load models. Pytorch Lightning will automatically move it to GPUs.
     model = created_model
-    # model.load_state_dict(load_state_dict(resume_path, location='cpu'))
+    model.load_state_dict(load_state_dict(resume_path, location='cpu'))
     model.learning_rate = learning_rate
     model.sd_locked = sd_locked
     model.only_mid_control = only_mid_control
@@ -746,8 +750,8 @@ def gen_new_image(args,topn_file,created_model,m2,s2,global_epoch,metrics):
                 img.save(png_path)
                 generate_infos[png_path] = {"race":race, "glaucoma_label":glaucoma_label, "gender":gender, "ethnicity":ethnicity, "language":language}
     generate = pd.DataFrame(generate_infos).T.reset_index(names='path')
-
-    def apply_process(x):
+    generate = generate.reset_index()
+    def fid_apply_process(x):
         path = x['path'].values
         if len(path)==1:
             path = np.tile(path, 2)
@@ -757,15 +761,144 @@ def gen_new_image(args,topn_file,created_model,m2,s2,global_epoch,metrics):
                                                           s2=s2)
         return fid
 
-    race = generate.groupby('race').apply(apply_process)
-    gender = generate.groupby('gender').apply(apply_process)
-    ethnicity = generate.groupby('ethnicity').apply(apply_process)
-    language = generate.groupby('language').apply(apply_process)
-    glaucoma_label = generate.groupby('glaucoma_label').apply(apply_process)
+    def ssim_apply_process(x):
+        path = x['path'].values
+        # 计算SSIM和MS-SSIM分数
+        # X: 生成图片路径列表，Y: 真实图片路径列表
+        if len(path) == 1:
+            path = np.tile(path, 2)
+
+        real_paths = []
+        for p in path:
+            basename = os.path.basename(p)
+            real_file_name = re.findall(r'data_\d+',basename)[0]
+            real_file_name = real_file_name+".png"
+            real_paths.append(os.path.join(args.dataset_dir, "FairCLIP调色后清洗/training_slo_fundus",real_file_name))
+
+        # 读取图片并转为tensor
+        imgs_gen = [transforms.ToTensor()(transforms.Resize((256, 256))(transforms.ToPILImage()(np.array(Image.open(p).convert('RGB'))))) for p in path]
+        imgs_real = [transforms.ToTensor()(transforms.Resize((256, 256))(transforms.ToPILImage()(np.array(Image.open(p).convert('RGB'))))) for p in real_paths]
+        X = torch.stack(imgs_gen, dim=0) * 255
+        Y = torch.stack(imgs_real, dim=0) * 255
+        X = X.type(torch.uint8).float().cuda()
+        Y = Y.type(torch.uint8).float().cuda()
+        # 计算ssim和ms-ssim
+        ssim_val = ssim(X, Y, data_range=255, size_average=True)
+        ms_ssim_val = ms_ssim(X, Y, data_range=255, size_average=True)
+        return {'ssim': float(ssim_val.cpu().numpy()), 'ms_ssim': float(ms_ssim_val.cpu().numpy())}
+
+    def lpips_apply_process(x):
+        # 读取图片路径
+        path = x['path'].values
+        if len(path) == 1:
+            path = np.tile(path, 2)
+        # 获取真实图片路径
+        real_paths = []
+        for p in path:
+            basename = os.path.basename(p)
+            real_file_name = re.findall(r'data_\d+',basename)[0]
+            real_file_name = real_file_name+".png"
+            real_paths.append(os.path.join(args.dataset_dir, "FairCLIP调色后清洗/training_slo_fundus",real_file_name))
+
+        # 读取图片并转为tensor，归一化到[-1,1]
+        imgs_gen = [transforms.ToTensor()(transforms.Resize((256, 256))(transforms.ToPILImage()(np.array(Image.open(p).convert('RGB'))))) for p in path]
+        imgs_real = [transforms.ToTensor()(transforms.Resize((256, 256))(transforms.ToPILImage()(np.array(Image.open(p).convert('RGB'))))) for p in real_paths]
+        X = torch.stack(imgs_gen, dim=0)
+        Y = torch.stack(imgs_real, dim=0)
+        # 归一化到[-1,1]
+        X = (X * 2 - 1).cuda()
+        Y = (Y * 2 - 1).cuda()
+        # 加载lpips模型
+        loss_fn_alex = lpips.LPIPS(net='alex').cuda()
+        # 计算LPIPS分数
+        # 逐对计算平均
+        alex_scores = []
+        for i in range(X.shape[0]):
+            img0 = X[i].unsqueeze(0)
+            img1 = Y[i].unsqueeze(0)
+            d_alex = loss_fn_alex(img0, img1)
+            alex_scores.append(float(d_alex.cpu().detach().numpy()))
+        return {'lpips_alex': float(np.mean(alex_scores))}
+    
+
+    race = generate.groupby('race').apply(fid_apply_process)
+    gender = generate.groupby('gender').apply(fid_apply_process)
+    ethnicity = generate.groupby('ethnicity').apply(fid_apply_process)
+    language = generate.groupby('language').apply(fid_apply_process)
+    glaucoma_label = generate.groupby('glaucoma_label').apply(fid_apply_process)
     all_fid, m2, s2 = fid_score.calculate_fid_given_paths([glob(save_dir+"/*.png"), glob(
-        os.path.join(args.dataset_dir, "FairCLIP调色后清洗/training_slo_fundus/*"))], 16, 'cuda', 2048, m2=m2,
-                                                      s2=s2)
+        os.path.join(args.dataset_dir, "FairCLIP调色后清洗/training_slo_fundus/*"))], 16, 'cuda', 2048, m2=m2,s2=s2)
+
+    race_ssim = generate.groupby('race').apply(ssim_apply_process)
+    gender_ssim = generate.groupby('gender').apply(ssim_apply_process)
+    ethnicity_ssim = generate.groupby('ethnicity').apply(ssim_apply_process)
+    language_ssim = generate.groupby('language').apply(ssim_apply_process)
+    glaucoma_label_ssim = generate.groupby('glaucoma_label').apply(ssim_apply_process)
+    
+
+    race_lpips = generate.groupby('race').apply(lpips_apply_process)
+    gender_lpips = generate.groupby('gender').apply(lpips_apply_process)
+    ethnicity_lpips = generate.groupby('ethnicity').apply(lpips_apply_process)
+    language_lpips = generate.groupby('language').apply(lpips_apply_process)
+    glaucoma_label_lpips = generate.groupby('glaucoma_label').apply(lpips_apply_process)
+    
+    # 计算所有生成图片的ssim并求平均
+    all_gen_paths = generate['path'].values
+    all_real_paths = []
+    for p in all_gen_paths:
+        basename = os.path.basename(p)
+        real_file_name = re.findall(r'data_\d+', basename)[0]
+        real_file_name = real_file_name + ".png"
+        all_real_paths.append(os.path.join(args.dataset_dir, "FairCLIP调色后清洗/training_slo_fundus", real_file_name))
+
+    # 读取图片并转为tensor，归一化到[-1,1]
+    imgs_gen = [transforms.ToTensor()(transforms.Resize((256, 256))(transforms.ToPILImage()(np.array(Image.open(p).convert('RGB'))))) for p in all_gen_paths]
+    imgs_real = [transforms.ToTensor()(transforms.Resize((256, 256))(transforms.ToPILImage()(np.array(Image.open(p).convert('RGB'))))) for p in all_real_paths]
+    X = torch.stack(imgs_gen, dim=0)
+    Y = torch.stack(imgs_real, dim=0)
+    # 计算SSIM分数
+    ssim_scores = []
+    ms_ssim_scores = []
+    for i in range(X.shape[0]):
+        img_gen = X[i].unsqueeze(0)
+        img_real = Y[i].unsqueeze(0)
+        score = ssim(img_gen, img_real, data_range=2, size_average=True)
+        ssim_scores.append(float(score.cpu().detach().numpy()))
+        ms_ssim_score = ms_ssim(img_gen, img_real, data_range=2, size_average=True)
+        ms_ssim_scores.append(float(ms_ssim_score.cpu().detach().numpy()))
+
+    all_ssim = {'all_ssim': float(np.mean(ssim_scores)),'all_ms_ssim': float(np.mean(ms_ssim_scores)),"race_ssim":race_ssim.to_dict(),"gender_ssim":gender_ssim.to_dict(),"ethnicity_ssim":ethnicity_ssim.to_dict(),"language_ssim":language_ssim.to_dict(),"glaucoma_label_ssim":glaucoma_label_ssim.to_dict()}
+
+    # 计算所有生成图片的lpips并求平均
+    loss_fn_alex = lpips.LPIPS(net='alex').cuda()
+    lpips_scores = []
+    X = (X * 2 - 1).cuda()
+    Y = (Y * 2 - 1).cuda()
+    for i in range(X.shape[0]):
+        img_gen = X[i].unsqueeze(0)
+        img_real = Y[i].unsqueeze(0)
+        d_alex = loss_fn_alex(img_gen, img_real)    
+        lpips_scores.append(float(d_alex.cpu().detach().numpy()))
+    all_lpips = {'all_lpips_alex': float(np.mean(lpips_scores)),"race_lpips":race_lpips.to_dict(),"gender_lpips":gender_lpips.to_dict(),"ethnicity_lpips":ethnicity_lpips.to_dict(),"language_lpips":language_lpips.to_dict(),"glaucoma_label_lpips":glaucoma_label_lpips.to_dict()}
+
+
+
+    
+    with open(os.path.join(args.result_dir,f'ssim.jsonl'), 'a', encoding='utf-8') as outfile:
+        json.dump(all_ssim, outfile, ensure_ascii=False)
+        outfile.write('\n')
+    with open(os.path.join(args.result_dir,f'lpips.jsonl'), 'a', encoding='utf-8') as outfile:
+        json.dump(all_lpips, outfile, ensure_ascii=False)
+        outfile.write('\n')
+
+
+
+
+                                                      
+    
     fid = {'global_epoch':global_epoch,"all_fid":all_fid,'glaucoma_label':glaucoma_label.to_dict(),'race':race.to_dict(),'gender':gender.to_dict(),'ethnicity':ethnicity.to_dict(),'language':language.to_dict()}
+
+
     with open(os.path.join(args.result_dir,f'fid.jsonl'), 'a', encoding='utf-8') as outfile:
         json.dump(fid, outfile, ensure_ascii=False)
         outfile.write('\n')
@@ -776,8 +909,12 @@ def gen_new_image(args,topn_file,created_model,m2,s2,global_epoch,metrics):
         else:
             for f_k, f_v in v.items():
                 metrics[f'fid-{k}-{f_k}'] = f_v
+    
+    logger.log(f'fid: {fid}')
+
+
     del model,dataset,dataloader,ddim_sampler
-    return fid,m2,s2
+    return m2,s2
 
 
 
@@ -820,10 +957,8 @@ if __name__ == '__main__':
         torch.cuda.empty_cache()
         gc.collect()
 
-        fid,m2,s2 = gen_new_image(args=args,topn_file=topn_file,created_model=created_model,m2=m2,s2=s2,global_epoch=global_epoch,metrics=metrics)
+        m2,s2 = gen_new_image(args=args,topn_file=topn_file,created_model=created_model,m2=m2,s2=s2,global_epoch=global_epoch,metrics=metrics)
         wandb.log(metrics, step=global_epoch, commit=True)
 
-
-        logger.log(f'fid: {fid}')
         torch.cuda.empty_cache()
         global_epoch += 1
