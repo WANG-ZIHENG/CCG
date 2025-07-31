@@ -1,5 +1,5 @@
 .idea/
-
+result/*
 models/*
 pytorch_lightning/
 lightning_logs/
