@@ -110,7 +110,8 @@ if __name__ == '__main__':
         'efficientnet_b7': models.efficientnet_b7,
     }
     if args.model_arch in efficientnet_archs:
-        model = efficientnet_archs[args.model_arch](weights=None)
+        efficientnet_b4_weights = models.EfficientNet_B4_Weights.DEFAULT
+        model = efficientnet_archs[args.model_arch](weights=efficientnet_b4_weights)
         num_features = model.classifier[1].in_features
         num_classes = 1  # 假设是二分类任务
         model.classifier[1] = nn.Linear(num_features, num_classes)

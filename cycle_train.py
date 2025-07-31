@@ -76,9 +76,9 @@ parser.add_argument('--summarized_note_file', default='/root/data/fairvlmed10k/d
 parser.add_argument('--text_source', default='note', type=str, help='options: note | label')
 parser.add_argument('--perf_file', default='', type=str)
 parser.add_argument('--model_arch', default='efficientnet_b4', type=str, help='options: efficientnet_b0 | efficientnet_b1 | efficientnet_b2 | efficientnet_b3 | efficientnet_b4 | efficientnet_b5 | efficientnet_b6 | efficientnet_b7')
-parser.add_argument('--pretrained_weights', default='models/efficientnet_b4_pretrain_0.7375.pth', type=str)
+parser.add_argument('--pretrained_weights', default='models/efficientnet_b4_pretrain_0.7757.pth', type=str)
 # parser.add_argument('--pretrained_weights', default='models/temp.pth', type=str)
-parser.add_argument('--mode', type=str,default='confidence', choices=['confidence', 'uncertainty','both'], help='Select confidence or uncertainty or both')
+parser.add_argument('--mode', type=str,default='both', choices=['confidence', 'uncertainty','both'], help='Select confidence or uncertainty or both')
 parser.add_argument('--use_gen_data', default=True, type=bool)
 
 
@@ -155,7 +155,8 @@ def train_resnet(args,global_epoch,metrics):
         'efficientnet_b7': models.efficientnet_b7,
     }
     if args.model_arch in efficientnet_archs:
-        model = efficientnet_archs[args.model_arch](weights=None)
+        efficientnet_b4_weights = models.EfficientNet_B4_Weights.DEFAULT
+        model = efficientnet_archs[args.model_arch](weights=efficientnet_b4_weights)
         num_features = model.classifier[1].in_features
         num_classes = 1  # 假设是二分类任务
         model.classifier[1] = nn.Linear(num_features, num_classes)
@@ -170,15 +171,21 @@ def train_resnet(args,global_epoch,metrics):
 
 
     model = model.to(device)
-    # if global_epoch == 0:
-    #     checkpoint = torch.load(args.pretrained_weights)
-    #
-    #
-    # else:
-    #     ckpt_path = os.path.join(args.result_dir,"last.pth")
-    #     checkpoint = torch.load(ckpt_path)
-    checkpoint = torch.load(args.pretrained_weights,weights_only=False)
+    if global_epoch == 0:
+        checkpoint = torch.load(args.pretrained_weights,weights_only=False)
+    
+    
+    else:
+        if os.path.exists(os.path.join(args.result_dir,"best.pth")):
+            ckpt_path = os.path.join(args.result_dir,"best.pth")
+            checkpoint = torch.load(ckpt_path,weights_only=False)
+        else:
+            ckpt_path = os.path.join(args.result_dir,"last.pth")
+            checkpoint = torch.load(args.pretrained_weights,weights_only=False)
 
+        
+    # checkpoint = torch.load(args.pretrained_weights,weights_only=False)
+    # checkpoint = {}
     train_files = 'filter_file.txt'
     test_files = None
     # 数据增强的transforms
@@ -230,15 +237,51 @@ def train_resnet(args,global_epoch,metrics):
 
 
 
-    best_auc = checkpoint['best_auc']
-    best_acc = checkpoint['best_acc']
-    best_ep = checkpoint['best_ep']
-    best_auc_groups = checkpoint['best_auc_groups']
-    best_dpd_groups = checkpoint['best_dpd_groups']
-    best_eod_groups = checkpoint['best_eod_groups']
-    best_es_acc = checkpoint['best_es_acc']
-    best_es_auc = checkpoint['best_es_auc']
-    best_between_group_disparity = checkpoint['best_between_group_disparity']
+    # best_auc = checkpoint['best_auc']
+    # best_acc = checkpoint['best_acc']
+    # best_ep = checkpoint['best_ep']
+    # best_auc_groups = checkpoint['best_auc_groups']
+    # best_dpd_groups = checkpoint['best_dpd_groups']
+    # best_eod_groups = checkpoint['best_eod_groups']
+    # best_es_acc = checkpoint['best_es_acc']
+    # best_es_auc = checkpoint['best_es_auc']
+    # best_between_group_disparity = checkpoint['best_between_group_disparity']
+    if 'best_auc' in checkpoint:
+        best_auc = checkpoint['best_auc']
+    else:
+        best_auc = -1
+    if 'best_acc' in checkpoint:
+        best_acc = checkpoint['best_acc']
+    else:
+        best_acc = -1
+    if 'best_ep' in checkpoint:
+        best_ep = checkpoint['best_ep']
+    else:
+        best_ep = -1
+    if 'best_auc_groups' in checkpoint:
+        best_auc_groups = checkpoint['best_auc_groups']
+    else:
+        best_auc_groups = -1
+    if 'best_dpd_groups' in checkpoint:
+        best_dpd_groups = checkpoint['best_dpd_groups']
+    else:
+        best_dpd_groups = -1
+    if 'best_eod_groups' in checkpoint:
+        best_eod_groups = checkpoint['best_eod_groups']
+    else:
+        best_eod_groups = -1
+    if 'best_es_acc' in checkpoint:
+        best_es_acc = checkpoint['best_es_acc']
+    else:
+        best_es_acc = -1
+    if 'best_es_auc' in checkpoint:
+        best_es_auc = checkpoint['best_es_auc']
+    else:
+        best_es_auc = -1
+    if 'best_between_group_disparity' in checkpoint:
+        best_between_group_disparity = checkpoint['best_between_group_disparity']
+    else:
+        best_between_group_disparity = -1
     if 'best_specificity' in checkpoint:
         best_specificity= checkpoint['best_specificity']
     else:
@@ -255,11 +298,14 @@ def train_resnet(args,global_epoch,metrics):
         best_precision= checkpoint['best_precision']
     else:
         best_precision = -1
+    
 
 
     start_epoch = 0
-    model.load_state_dict(checkpoint['model_state_dict'])
-    optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
+    if 'model_state_dict' in checkpoint:
+        model.load_state_dict(checkpoint['model_state_dict'])
+    if 'optimizer_state_dict' in checkpoint:
+        optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
 
     # 初始化
     # model_ema = EMA(model, 0.999)
@@ -291,6 +337,8 @@ def train_resnet(args,global_epoch,metrics):
                 ema.register(basename,[logits, label])
             loss = bce(logits_per_image, glaucoma_label.float())
             if global_epoch == 0:
+                loss.backward()
+                optimizer.step()
                 pass
             else:
                 loss.backward()
@@ -924,10 +972,10 @@ if __name__ == '__main__':
     current_date = datetime.datetime.now()
     # 格式化日期为字符串，例如：2024-09-25
     date_string = current_date.strftime('%m-%d')
-    resume = False
+    resume = True
     if resume:
-        args.seed = 87620
-        args.result_dir = f'/root/cloud/ziheng/cycle-{args.mode}-{args.model_arch}-seed{args.seed}_{args.model_arch}永远加载预训练模型'
+        args.seed = 88318
+        args.result_dir = f'/root/cloud/ziheng/{date_string}-cycle-{args.mode}-{args.model_arch}-seed{args.seed}_{args.model_arch}每次加载上一次最好的模型'
         if not os.path.exists(args.result_dir):
             global_epoch = 0
         else:
@@ -936,7 +984,7 @@ if __name__ == '__main__':
         global_epoch = 0
         if args.seed < 0:
             args.seed = int(np.random.randint(100000, size=1)[0])
-        args.result_dir = f'/root/cloud/ziheng/{date_string}-cycle-{args.mode}-{args.model_arch}-seed{args.seed}_{args.model_arch}永远加载预训练模型'
+        args.result_dir = f'/root/cloud/ziheng/{date_string}-cycle-{args.mode}-{args.model_arch}-seed{args.seed}_{args.model_arch}每次加载上一次最好的模型'
         logger.log(f'===> random seed: {args.seed}')
         logger.configure(dir=args.result_dir, log_suffix=f'train-global{global_epoch}')
         with open(os.path.join(args.result_dir, f'args_train.txt'), 'w') as f:
@@ -950,6 +998,7 @@ if __name__ == '__main__':
         logger.configure(dir=args.result_dir, log_suffix=f'train-global{global_epoch}')
         logger.log(f'global epoch: {global_epoch}')
         topn_file = train_resnet(args,global_epoch=global_epoch,metrics=metrics)
+        # break
         torch.cuda.empty_cache()
         # topn_file = topn_file[:3]
         topn_file = list(topn_file)
