@@ -9,11 +9,15 @@
 ## 🛠️ Install dependencies
 
 ```python
+conda create -n GlaucoDiff python=3.11.7
+conda activate GlaucoDiff
 pip install -r requirements.txt
 ```
 
 ## 📁 Data preparation
 
 The Harvard-FairVLMed dataset (named as **fairvlmed10k**) can be accessed via this [link](https://github.com/Harvard-Ophthalmology-AI-Lab/FairCLIP).
+
+We provide the `data_summary.csv` and `filter_file.txt` files for both datasets, which include the filenames used in our experiments, along with information on whether each file is used for the training, validation, or test set, as well as the demographic information and medical records from the source data.
 
 **The complete code will be made publicly available after the paper is accepted. Coming Soon.**
