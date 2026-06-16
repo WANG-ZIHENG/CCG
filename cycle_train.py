@@ -18,12 +18,15 @@ import torchvision.models as models
 import torchvision.transforms as transforms
 import einops
 from pytorch_lightning import seed_everything
+from transformers import ConvNextV2ForImageClassification, ConvNextV2Config
 import sys
 sys.path.append('.')
 from cldm.ddim_hacked import DDIMSampler
 from cycle_resnet_src.modules import *
 from cycle_resnet_src import logger
 import shutil
+from train_pretrain_model import ModelWrapper
+
 
 from share import *
 import sys
@@ -55,7 +58,8 @@ parser = argparse.ArgumentParser(description='FairCLIP Training/Fine-Tuning')
 
 parser.add_argument('--seed', default=-1, type=int,
                     help='seed for initializing training. ')
-parser.add_argument('--num_epochs', default=30, type=int)
+parser.add_argument('--num_epochs', default=30, type=int,
+                    help='CNN classifier fine-tune epochs per cycle')
 parser.add_argument('--lr', '--learning-rate', default=1e-5, type=float,
                     metavar='LR', help='initial learning rate', dest='lr')
 parser.add_argument('--momentum', default=0.9, type=float, metavar='M',
@@ -64,22 +68,33 @@ parser.add_argument('--wd', '--weight-decay', default=6e-5, type=float,
                     metavar='W', help='weight decay (default: 6e-5)',
                     dest='weight_decay')
 
-parser.add_argument('--result_dir', default='/root/cloud/ziheng/output/results', type=str)
-parser.add_argument('--dataset_dir', default='/root/data/fairvlmed10k', type=str)
-# parser.add_argument('--dataset_dir', default='/H_share/data/fairvlmed10k', type=str)
-parser.add_argument('--batch_size', default=8, type=int)
+parser.add_argument('--result_dir', default='./results/ccg_run', type=str)
+parser.add_argument('--dataset_dir', default='/root/autodl-tmp/data/fairvlmed10k', type=str)
+parser.add_argument('--batch_size', default=16, type=int)
 parser.add_argument('--workers', default=8, type=int)
 parser.add_argument('--eval_set', default='test', type=str, help='options: val | test')
-# parser.add_argument('--summarized_note_file', default='/H_share/data/fairvlmed10k/gpt-4_summarized_notes.csv',
-#                     type=str)
-parser.add_argument('--summarized_note_file', default='/root/data/fairvlmed10k/data_summary_all.csv')
+parser.add_argument('--summarized_note_file',
+                    default='/root/autodl-tmp/data/fairvlmed10k/data_summary_all.csv',
+                    help='summary csv with demographic info; combined with '
+                         'filter_file.txt (under dataset_dir) yields the 7363-row subset')
 parser.add_argument('--text_source', default='note', type=str, help='options: note | label')
 parser.add_argument('--perf_file', default='', type=str)
-parser.add_argument('--model_arch', default='efficientnet_b4', type=str, help='options: efficientnet_b0 | efficientnet_b1 | efficientnet_b2 | efficientnet_b3 | efficientnet_b4 | efficientnet_b5 | efficientnet_b6 | efficientnet_b7')
-parser.add_argument('--pretrained_weights', default='models/efficientnet_b4_pretrain_0.7757.pth', type=str)
-# parser.add_argument('--pretrained_weights', default='models/temp.pth', type=str)
+parser.add_argument('--model_arch', default='efficientnet_b0', type=str, help='options: efficientnet_b0 | efficientnet_b1 | efficientnet_b2 | efficientnet_b3 | efficientnet_b4 | efficientnet_b5 | efficientnet_b6 | efficientnet_b7 | convnextv2_tiny_1k_224 | convnextv2_base_1k_224 | convnextv2_large_1k_224 | convnextv2_tiny_22k_384 | convnextv2_base_22k_384 | convnextv2_large_22k_384')
+parser.add_argument('--pretrained_weights', default='', type=str,
+                    help='optional classifier pretrained .pth; empty = ImageNet init')
 parser.add_argument('--mode', type=str,default='both', choices=['confidence', 'uncertainty','both'], help='Select confidence or uncertainty or both')
 parser.add_argument('--use_gen_data', default=True, type=bool)
+parser.add_argument('--max_cycles', default=5, type=int,
+                    help='total CCG cycles')
+parser.add_argument('--resume_ckpt', default='', type=str,
+                    help='optional ControlNet ckpt to warm-start Cycle 0; '
+                         'empty = fresh from ./models/control_sd21_ini.ckpt')
+parser.add_argument('--real_train_png_dir',
+                    default='/root/autodl-tmp/data/fairvlmed10k/FairCLIP调色后清洗/training_slo_fundus',
+                    type=str,
+                    help='dir of real training-set PNGs used as the reference '
+                         'distribution for FID / SSIM / LPIPS scoring of generated '
+                         'images. One PNG per npz, basename = data_XXXXX.png.')
 
 
 def inference(loader,model,args,device):
@@ -154,43 +169,65 @@ def train_resnet(args,global_epoch,metrics):
         'efficientnet_b6': models.efficientnet_b6,
         'efficientnet_b7': models.efficientnet_b7,
     }
+    
+    # ConvNeXt V2 模型映射到 Hugging Face 预训练模型名称
+    convnextv2_archs = {
+        'convnextv2_tiny_1k_224': 'facebook/convnextv2-tiny-1k-224',
+        'convnextv2_base_1k_224': 'facebook/convnextv2-base-1k-224',
+        'convnextv2_large_1k_224': 'facebook/convnextv2-large-1k-224',
+        'convnextv2_tiny_22k_384': 'facebook/convnextv2-tiny-22k-384',
+        'convnextv2_base_22k_384': 'facebook/convnextv2-base-22k-384',
+        'convnextv2_large_22k_384': 'facebook/convnextv2-large-22k-384',
+    }
+    
     if args.model_arch in efficientnet_archs:
-        efficientnet_b4_weights = models.EfficientNet_B4_Weights.DEFAULT
-        model = efficientnet_archs[args.model_arch](weights=efficientnet_b4_weights)
-        num_features = model.classifier[1].in_features
+        base_model = efficientnet_archs[args.model_arch](weights=True)
+        num_features = base_model.classifier[1].in_features
         num_classes = 1  # 假设是二分类任务
-        model.classifier[1] = nn.Linear(num_features, num_classes)
+        base_model.classifier[1] = nn.Linear(num_features, num_classes)
+        model = ModelWrapper(base_model, is_convnextv2=False)
     
     elif args.model_arch == 'resnet18':
-        model = models.resnet18(weights=None)
-        num_features = model.fc.in_features
+        base_model = models.resnet18(weights=True)
+        num_features = base_model.fc.in_features
         num_classes = 1  # 假设是二分类任务
-        model.fc = nn.Linear(num_features, num_classes)
+        base_model.fc = nn.Linear(num_features, num_classes)
+        model = ModelWrapper(base_model, is_convnextv2=False)
+    
+    elif args.model_arch in convnextv2_archs:
+        # 使用 ConvNeXt V2 预训练模型
+        pretrained_model_name = convnextv2_archs[args.model_arch]
+        base_model = ConvNextV2ForImageClassification.from_pretrained(
+            pretrained_model_name,
+            num_labels=1,  # 二分类任务
+            ignore_mismatched_sizes=True  # 允许分类头大小不匹配
+        )
+        model = ModelWrapper(base_model, is_convnextv2=True)
+    
     else:
         raise ValueError(f"暂不支持的模型架构: {args.model_arch}")
 
 
     model = model.to(device)
-    if global_epoch == 0:
-        checkpoint = torch.load(args.pretrained_weights,weights_only=False)
-    
-    
+    # Optional CCG-format checkpoint warm-start (saved by a previous run's best.pth).
+    # If --pretrained_weights is empty OR the file does not exist, we fall back to
+    # the ImageNet-pretrained backbone (paper-faithful starting point) and zero-init
+    # all best_* metrics.
+    if args.pretrained_weights and os.path.isfile(args.pretrained_weights):
+        checkpoint = torch.load(args.pretrained_weights, weights_only=False)
     else:
-        if os.path.exists(os.path.join(args.result_dir,"best.pth")):
-            ckpt_path = os.path.join(args.result_dir,"best.pth")
-            checkpoint = torch.load(ckpt_path,weights_only=False)
+        if args.pretrained_weights:
+            logger.log(f'WARN: --pretrained_weights "{args.pretrained_weights}" not found, '
+                       f'using ImageNet init only.')
         else:
-            ckpt_path = os.path.join(args.result_dir,"last.pth")
-            checkpoint = torch.load(args.pretrained_weights,weights_only=False)
+            logger.log('No --pretrained_weights supplied; using ImageNet init.')
+        checkpoint = None
 
-        
-    # checkpoint = torch.load(args.pretrained_weights,weights_only=False)
-    # checkpoint = {}
     train_files = 'filter_file.txt'
     test_files = None
     # 数据增强的transforms
     transform_train = transforms.Compose([
-        transforms.RandomResizedCrop(size=512),
+        transforms.RandomResizedCrop(size=224),
         transforms.RandomHorizontalFlip(),
         transforms.RandomVerticalFlip(),
         # transforms.ColorJitter(brightness=0.2, contrast=0.2, saturation=0.2, hue=0.2),
@@ -201,7 +238,7 @@ def train_resnet(args,global_epoch,metrics):
 
     # 测试集的transforms
     transform_test = transforms.Compose([
-        transforms.RandomResizedCrop(size=512),
+        transforms.RandomResizedCrop(size=224),
         transforms.ToTensor(),
         transforms.Normalize(mean=[0.5], std=[0.5]),
     ])
@@ -237,75 +274,40 @@ def train_resnet(args,global_epoch,metrics):
 
 
 
-    # best_auc = checkpoint['best_auc']
-    # best_acc = checkpoint['best_acc']
-    # best_ep = checkpoint['best_ep']
-    # best_auc_groups = checkpoint['best_auc_groups']
-    # best_dpd_groups = checkpoint['best_dpd_groups']
-    # best_eod_groups = checkpoint['best_eod_groups']
-    # best_es_acc = checkpoint['best_es_acc']
-    # best_es_auc = checkpoint['best_es_auc']
-    # best_between_group_disparity = checkpoint['best_between_group_disparity']
-    if 'best_auc' in checkpoint:
-        best_auc = checkpoint['best_auc']
+    if checkpoint is not None:
+        best_auc                     = checkpoint.get('best_auc', -1)
+        best_acc                     = checkpoint.get('best_acc', -1)
+        best_ep                      = checkpoint.get('best_ep', -1)
+        best_auc_groups              = checkpoint.get('best_auc_groups', None)
+        best_dpd_groups              = checkpoint.get('best_dpd_groups', None)
+        best_eod_groups              = checkpoint.get('best_eod_groups', None)
+        best_es_acc                  = checkpoint.get('best_es_acc', -1)
+        best_es_auc                  = checkpoint.get('best_es_auc', -1)
+        best_between_group_disparity = checkpoint.get('best_between_group_disparity', None)
+        best_specificity             = checkpoint.get('best_specificity', -1)
+        best_sensitivity             = checkpoint.get('best_sensitivity', -1)
+        best_f1                      = checkpoint.get('best_f1', -1)
+        best_precision               = checkpoint.get('best_precision', -1)
     else:
-        best_auc = -1
-    if 'best_acc' in checkpoint:
-        best_acc = checkpoint['best_acc']
-    else:
-        best_acc = -1
-    if 'best_ep' in checkpoint:
-        best_ep = checkpoint['best_ep']
-    else:
-        best_ep = -1
-    if 'best_auc_groups' in checkpoint:
-        best_auc_groups = checkpoint['best_auc_groups']
-    else:
-        best_auc_groups = -1
-    if 'best_dpd_groups' in checkpoint:
-        best_dpd_groups = checkpoint['best_dpd_groups']
-    else:
-        best_dpd_groups = -1
-    if 'best_eod_groups' in checkpoint:
-        best_eod_groups = checkpoint['best_eod_groups']
-    else:
-        best_eod_groups = -1
-    if 'best_es_acc' in checkpoint:
-        best_es_acc = checkpoint['best_es_acc']
-    else:
-        best_es_acc = -1
-    if 'best_es_auc' in checkpoint:
-        best_es_auc = checkpoint['best_es_auc']
-    else:
-        best_es_auc = -1
-    if 'best_between_group_disparity' in checkpoint:
-        best_between_group_disparity = checkpoint['best_between_group_disparity']
-    else:
-        best_between_group_disparity = -1
-    if 'best_specificity' in checkpoint:
-        best_specificity= checkpoint['best_specificity']
-    else:
-        best_specificity = -1
-    if 'best_sensitivity' in checkpoint:
-        best_sensitivity= checkpoint['best_sensitivity']
-    else:
-        best_sensitivity = -1
-    if 'best_f1' in checkpoint:
-        best_f1= checkpoint['best_f1']
-    else:
-        best_f1 = -1
-    if 'best_precision' in checkpoint:
-        best_precision= checkpoint['best_precision']
-    else:
-        best_precision = -1
-    
-
+        best_auc = best_acc = best_ep = -1
+        best_auc_groups = best_dpd_groups = best_eod_groups = None
+        best_es_acc = best_es_auc = -1
+        best_between_group_disparity = None
+        best_specificity = best_sensitivity = best_f1 = best_precision = -1
 
     start_epoch = 0
-    if 'model_state_dict' in checkpoint:
-        model.load_state_dict(checkpoint['model_state_dict'])
-    if 'optimizer_state_dict' in checkpoint:
-        optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
+    if checkpoint is not None and 'model_state_dict' in checkpoint:
+        try:
+            model.load_state_dict(checkpoint['model_state_dict'])
+        except RuntimeError as e:
+            logger.log(f'WARN: model.load_state_dict failed, trying strict=False. '
+                       f'Reason: {str(e)[:200]}')
+            model.load_state_dict(checkpoint['model_state_dict'], strict=False)
+    if checkpoint is not None and 'optimizer_state_dict' in checkpoint:
+        try:
+            optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
+        except (ValueError, KeyError) as e:
+            logger.log(f'WARN: optimizer.load_state_dict skipped: {str(e)[:200]}')
 
     # 初始化
     # model_ema = EMA(model, 0.999)
@@ -315,7 +317,7 @@ def train_resnet(args,global_epoch,metrics):
     # 初始化
     ema = EMA_confidence(confidence_dict, 0.999)
     if global_epoch ==0:
-        epochs = 1
+        epochs = args.num_epochs
     else:
         epochs = args.num_epochs
 
@@ -329,22 +331,20 @@ def train_resnet(args,global_epoch,metrics):
             # texts = texts.to(device)
             glaucoma_label = glaucoma_label.to(device)
             logits_per_image = model(images)
-            logits_per_image = logits_per_image.squeeze()
+            # squeeze(-1): only drop the trailing channel dim, keep batch dim
+            # even when batch_size == 1 (otherwise BCE shape mismatch).
+            logits_per_image = logits_per_image.squeeze(-1)
             sigmoid_logits_per_image = logits_per_image.sigmoid().cpu().detach().numpy()
             glaucoma_label_numpy = glaucoma_label.cpu().detach().numpy()
             for logits, label, basename in zip(sigmoid_logits_per_image, glaucoma_label_numpy, base_names):
                 confidence_dict[basename] = [logits, label]
                 ema.register(basename,[logits, label])
             loss = bce(logits_per_image, glaucoma_label.float())
-            if global_epoch == 0:
-                loss.backward()
-                optimizer.step()
-                pass
-            else:
-                loss.backward()
-                # torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=10, norm_type=2)
-                optimizer.step()
-                # model_ema.update()
+
+            loss.backward()
+            # torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=10, norm_type=2)
+            optimizer.step()
+            # model_ema.update()
 
             avg_loss += loss.item()
 
@@ -368,7 +368,7 @@ def train_resnet(args,global_epoch,metrics):
             if loader == test_dataloader:
                 logger.log(
                     f'==== test =====')
-                if  os.path.exists('best.pth'):
+                if  os.path.exists(os.path.join(args.result_dir, f"best.pth")):
                     model.load_state_dict(
                         torch.load(os.path.join(args.result_dir, f"best.pth"))['model_state_dict'])
                 else:
@@ -392,7 +392,9 @@ def train_resnet(args,global_epoch,metrics):
                 class_text_feats = []
                 with torch.no_grad():
                     image_features = model(images)
-                    image_features = image_features.squeeze()
+                    # squeeze(-1): only drop the trailing channel dim, keep batch dim
+                    # even when batch_size == 1 (otherwise BCE shape mismatch).
+                    image_features = image_features.squeeze(-1)
 
                 vl_prob = torch.sigmoid(image_features)
                 vl_logits = image_features
@@ -414,7 +416,7 @@ def train_resnet(args,global_epoch,metrics):
             logger.log(
                 f'===> epoch[{epoch:03d}/{epochs:03d}], training loss: {avg_loss:.4f}, eval loss: {eval_avg_loss:.4f}')
 
-            overall_acc, eval_es_acc, overall_auc, eval_es_auc, eval_aucs_by_attrs, eval_dpds, eval_eods, between_group_disparity,specificity,sensitivity,f1,precision = evalute_comprehensive_perf(
+            overall_acc, eval_es_acc, overall_auc, eval_es_auc, eval_aucs_by_attrs, eval_dpds, eval_eods, between_group_disparity, specificity, sensitivity, f1, precision, mcc, qwk = evalute_comprehensive_perf(
                 all_probs, all_labels, all_attrs.T)
 
             if best_specificity == -1:
@@ -508,6 +510,8 @@ def train_resnet(args,global_epoch,metrics):
             logger.logkv('eval_loss', round(eval_avg_loss, 4))
             logger.logkv('eval_acc', round(overall_acc, 4))
             logger.logkv('eval_auc', round(overall_auc, 4))
+            logger.logkv('eval_mcc', round(mcc, 4))
+            logger.logkv('eval_qwk', round(qwk, 4))
             logger.logkv('eval_specificity', round(specificity, 4))
             logger.logkv('eval_sensitivity', round(sensitivity, 4))
             logger.logkv('eval_f1', round(f1, 4))
@@ -535,8 +539,8 @@ def train_resnet(args,global_epoch,metrics):
     ema.apply_shadow()
     ema.restore()
     confidence_dict = ema.confidence
-    top_n = 0.05 #获取前n%索引
-    remove_n = 0.025 #删除前n%索引
+    top_n    = 0.05   # hard-case selection ratio from source D_s
+    remove_n = 0.50   # pruning ratio for the generated set D_g
     logger.log(f'---- top_n {top_n} remove_n {remove_n}')
     if args.mode == "confidence":
         #置信度模式
@@ -611,8 +615,7 @@ def train_resnet(args,global_epoch,metrics):
     if len(gen_t_indices) == 0:
         pass
     else:
-        # 获取前50%的误判程度高的索引(生成500张，删除250张)
-        topn_gen_t_indices = gen_t_indices[:int(len(t_indices) * remove_n)]
+        topn_gen_t_indices = gen_t_indices[:int(len(gen_t_indices) * remove_n)]
         topn_gen_path = gen_file[topn_gen_t_indices][:, 0]
         # 执行删除
         for path in topn_gen_path:
@@ -673,14 +676,13 @@ def get_last_global(result_dir):
     return last_global
 
 def train_control(args,global_epoch,topn_file,created_model):
-    # Configs
     resume_path = './models/control_sd21_ini.ckpt'
-    batch_size = 3
+    batch_size = 2
     logger_freq = 300
     learning_rate = 1e-5
     sd_locked = False
     only_mid_control = False
-    finetune_epoch = 1
+    finetune_epoch = 2
 
     # First use cpu to load models. Pytorch Lightning will automatically move it to GPUs.
     model = created_model
@@ -690,12 +692,19 @@ def train_control(args,global_epoch,topn_file,created_model):
     model.only_mid_control = only_mid_control
 
     if global_epoch == 0:
-        ckpt_path = ""
-        now_epoch = 0
+        # Cycle 0: optionally warm-start from a previously trained ControlNet ckpt
+        # via --resume_ckpt; otherwise train from the SD21 ControlNet init only.
+        if args.resume_ckpt:
+            ckpt_path = args.resume_ckpt
+            now_epoch = int(re.findall(r'epoch=(\d+)', ckpt_path)[0]) \
+                        if re.findall(r'epoch=(\d+)', ckpt_path) else 0
+        else:
+            ckpt_path = None
+            now_epoch = 0
     else:
         ckpt_path = get_last_lightning_cpkpt(args.result_dir)
-        now_epoch = int(re.findall('epoch=(\d+)',ckpt_path)[0])
-    max_epoch = now_epoch + finetune_epoch+1
+        now_epoch = int(re.findall(r'epoch=(\d+)', ckpt_path)[0])
+    max_epoch = now_epoch + finetune_epoch + 1
 
 
 
@@ -707,7 +716,10 @@ def train_control(args,global_epoch,topn_file,created_model):
     trainer = pl.Trainer(gpus=1, precision=32, callbacks=[logger, save_checkpoint], max_epochs=max_epoch,weights_save_path=args.result_dir)
 
     # Train!
-    trainer.fit(model, dataloader,ckpt_path=ckpt_path)
+    if ckpt_path is not None:
+        trainer.fit(model, dataloader, ckpt_path=ckpt_path)
+    else:
+        trainer.fit(model, dataloader)
 
     del trainer,model,dataloader,logger,dataset
 def process(input_image, prompt, a_prompt, n_prompt, num_samples, image_resolution, detect_resolution, ddim_steps, guess_mode, strength, scale, seed, eta,model,ddim_sampler):
@@ -805,7 +817,7 @@ def gen_new_image(args,topn_file,created_model,m2,s2,global_epoch,metrics):
             path = np.tile(path, 2)
         nonlocal m2,s2
         fid, m2, s2 = fid_score.calculate_fid_given_paths([path, glob(
-            os.path.join(args.dataset_dir, "FairCLIP调色后清洗/training_slo_fundus/*"))], 16, 'cuda', 2048, m2=m2,
+            os.path.join(args.real_train_png_dir, "*"))], 16, 'cuda', 2048, m2=m2,
                                                           s2=s2)
         return fid
 
@@ -821,7 +833,7 @@ def gen_new_image(args,topn_file,created_model,m2,s2,global_epoch,metrics):
             basename = os.path.basename(p)
             real_file_name = re.findall(r'data_\d+',basename)[0]
             real_file_name = real_file_name+".png"
-            real_paths.append(os.path.join(args.dataset_dir, "FairCLIP调色后清洗/training_slo_fundus",real_file_name))
+            real_paths.append(os.path.join(args.real_train_png_dir, real_file_name))
 
         # 读取图片并转为tensor
         imgs_gen = [transforms.ToTensor()(transforms.Resize((256, 256))(transforms.ToPILImage()(np.array(Image.open(p).convert('RGB'))))) for p in path]
@@ -846,7 +858,7 @@ def gen_new_image(args,topn_file,created_model,m2,s2,global_epoch,metrics):
             basename = os.path.basename(p)
             real_file_name = re.findall(r'data_\d+',basename)[0]
             real_file_name = real_file_name+".png"
-            real_paths.append(os.path.join(args.dataset_dir, "FairCLIP调色后清洗/training_slo_fundus",real_file_name))
+            real_paths.append(os.path.join(args.real_train_png_dir, real_file_name))
 
         # 读取图片并转为tensor，归一化到[-1,1]
         imgs_gen = [transforms.ToTensor()(transforms.Resize((256, 256))(transforms.ToPILImage()(np.array(Image.open(p).convert('RGB'))))) for p in path]
@@ -875,7 +887,7 @@ def gen_new_image(args,topn_file,created_model,m2,s2,global_epoch,metrics):
     language = generate.groupby('language').apply(fid_apply_process)
     glaucoma_label = generate.groupby('glaucoma_label').apply(fid_apply_process)
     all_fid, m2, s2 = fid_score.calculate_fid_given_paths([glob(save_dir+"/*.png"), glob(
-        os.path.join(args.dataset_dir, "FairCLIP调色后清洗/training_slo_fundus/*"))], 16, 'cuda', 2048, m2=m2,s2=s2)
+        os.path.join(args.real_train_png_dir, "*"))], 16, 'cuda', 2048, m2=m2,s2=s2)
 
     race_ssim = generate.groupby('race').apply(ssim_apply_process)
     gender_ssim = generate.groupby('gender').apply(ssim_apply_process)
@@ -897,7 +909,7 @@ def gen_new_image(args,topn_file,created_model,m2,s2,global_epoch,metrics):
         basename = os.path.basename(p)
         real_file_name = re.findall(r'data_\d+', basename)[0]
         real_file_name = real_file_name + ".png"
-        all_real_paths.append(os.path.join(args.dataset_dir, "FairCLIP调色后清洗/training_slo_fundus", real_file_name))
+        all_real_paths.append(os.path.join(args.real_train_png_dir, real_file_name))
 
     # 读取图片并转为tensor，归一化到[-1,1]
     imgs_gen = [transforms.ToTensor()(transforms.Resize((256, 256))(transforms.ToPILImage()(np.array(Image.open(p).convert('RGB'))))) for p in all_gen_paths]
@@ -968,46 +980,51 @@ def gen_new_image(args,topn_file,created_model,m2,s2,global_epoch,metrics):
 
 if __name__ == '__main__':
     args = parser.parse_args()
-    # 获取当前日期
-    current_date = datetime.datetime.now()
-    # 格式化日期为字符串，例如：2024-09-25
-    date_string = current_date.strftime('%m-%d')
-    resume = True
-    if resume:
-        args.seed = 88318
-        args.result_dir = f'/root/cloud/ziheng/{date_string}-cycle-{args.mode}-{args.model_arch}-seed{args.seed}_{args.model_arch}每次加载上一次最好的模型'
-        if not os.path.exists(args.result_dir):
-            global_epoch = 0
-        else:
-            global_epoch = get_last_global(args.result_dir)
-    else:
+
+    if args.seed < 0:
+        args.seed = int(np.random.randint(100000, size=1)[0])
+
+    # Result dir: honor --result_dir; create if missing.
+    os.makedirs(args.result_dir, exist_ok=True)
+
+    # If this dir already contains prior log_train-global*.txt, resume from the
+    # latest global epoch; otherwise start fresh.
+    try:
+        global_epoch = get_last_global(args.result_dir)
+    except (IndexError, ValueError):
         global_epoch = 0
-        if args.seed < 0:
-            args.seed = int(np.random.randint(100000, size=1)[0])
-        args.result_dir = f'/root/cloud/ziheng/{date_string}-cycle-{args.mode}-{args.model_arch}-seed{args.seed}_{args.model_arch}每次加载上一次最好的模型'
-        logger.log(f'===> random seed: {args.seed}')
-        logger.configure(dir=args.result_dir, log_suffix=f'train-global{global_epoch}')
-        with open(os.path.join(args.result_dir, f'args_train.txt'), 'w') as f:
-            json.dump(args.__dict__, f, indent=2)
+
+    logger.configure(dir=args.result_dir, log_suffix=f'train-global{global_epoch}')
+    logger.log(f'===> random seed: {args.seed}')
+    logger.log(f'===> result_dir : {args.result_dir}')
+    logger.log(f'===> max_cycles : {args.max_cycles}')
+
+    with open(os.path.join(args.result_dir, 'args_train.txt'), 'w') as f:
+        json.dump(args.__dict__, f, indent=2)
+
     created_model = create_model('./models/cldm_v21.yaml').cpu()
-    wandb.init(dir=os.path.join(args.result_dir,'wandb'), project="cycle_train",
-               name=args.result_dir, config=args, job_type=f'train', entity="ziheng-wang",mode='offline')
+    wandb.init(dir=os.path.join(args.result_dir, 'wandb'), project='ccg_cycle_train',
+               name=os.path.basename(args.result_dir), config=args,
+               job_type='train', mode='offline')
+
     m2, s2 = None, None
-    while True:
+    while global_epoch < args.max_cycles:
         metrics = {}
         logger.configure(dir=args.result_dir, log_suffix=f'train-global{global_epoch}')
         logger.log(f'global epoch: {global_epoch}')
-        topn_file = train_resnet(args,global_epoch=global_epoch,metrics=metrics)
-        # break
+        topn_file = train_resnet(args, global_epoch=global_epoch, metrics=metrics)
         torch.cuda.empty_cache()
-        # topn_file = topn_file[:3]
         topn_file = list(topn_file)
-        train_control(args=args,global_epoch= global_epoch,topn_file= topn_file,created_model=created_model)
+        train_control(args=args, global_epoch=global_epoch, topn_file=topn_file,
+                      created_model=created_model)
         torch.cuda.empty_cache()
         gc.collect()
 
-        m2,s2 = gen_new_image(args=args,topn_file=topn_file,created_model=created_model,m2=m2,s2=s2,global_epoch=global_epoch,metrics=metrics)
+        m2, s2 = gen_new_image(args=args, topn_file=topn_file, created_model=created_model,
+                               m2=m2, s2=s2, global_epoch=global_epoch, metrics=metrics)
         wandb.log(metrics, step=global_epoch, commit=True)
 
         torch.cuda.empty_cache()
         global_epoch += 1
+
+    logger.log(f'CCG training finished: {args.max_cycles} cycles completed.')

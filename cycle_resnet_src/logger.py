@@ -50,7 +50,7 @@ class HumanOutputFormat(KVWriter, SeqWriter):
         key2str = {}
         for (key, val) in sorted(kvs.items()):
             if hasattr(val, "__float__"):
-                valstr = "%-8.3g" % val
+                valstr = "%-8.4g" % val
             else:
                 valstr = str(val)
             key2str[self._truncate(key)] = self._truncate(valstr)
