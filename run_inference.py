@@ -33,7 +33,8 @@ from cldm.ddim_hacked import DDIMSampler
 # ---- default checkpoint: CCG ControlNet on SD 2.1 ----
 # Download the released weight into `<repo_root>/checkpoints/`
 # or pass an explicit path as the first positional argument.
-DEFAULT_CKPT = os.path.join(HERE, "checkpoints", "ccg_controlnet_sd21.ckpt")
+# Both `.safetensors` (fp16, recommended) and `.ckpt` are supported.
+DEFAULT_CKPT = os.path.join(HERE, "checkpoints", "ccg_controlnet_sd21.safetensors")
 CONFIG       = os.path.join(HERE, "models", "cldm_v21.yaml")
 DATA_DIR     = "/root/autodl-tmp/data/fairvlmed10k"
 DEFAULT_OUT  = os.path.join(HERE, "gen_out")
@@ -131,7 +132,12 @@ def main():
 
     print("[1] loading model ...")
     model = create_model(CONFIG).cpu()
-    model.load_state_dict(load_state_dict(ckpt, location="cpu"), strict=False)
+    if ckpt.endswith(".safetensors"):
+        from safetensors.torch import load_file
+        state_dict = load_file(ckpt, device="cpu")
+    else:
+        state_dict = load_state_dict(ckpt, location="cpu")
+    model.load_state_dict(state_dict, strict=False)
     model = model.cuda().eval()
     sampler = DDIMSampler(model)
     print(f"    params: {sum(p.numel() for p in model.parameters())/1e9:.2f} B")

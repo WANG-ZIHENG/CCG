@@ -48,20 +48,20 @@ The code is tested with PyTorch 2.0 (CUDA 11.8) on Linux.
 | Checkpoint | Size | Purpose | Download |
 |---|---|---|---|
 | `control_sd21_ini.ckpt` | 6.7 GB | Stable Diffusion 2.1 + empty ControlNet branch (training start) | [HuggingFace](https://huggingface.co/lllyasviel/ControlNet) |
-| `ccg_controlnet_sd21.ckpt` | 13.7 GB | Trained CCG ControlNet (Lightning format) | [Google Drive (TBD)](https://drive.google.com/) |
+| `ccg_controlnet_sd21.safetensors` | 3.34 GB | Trained CCG ControlNet (fp16, inference-ready) | [Hugging Face](https://huggingface.co/ZihengWang/CCG) |
 
 Place both files under `checkpoints/`:
 
 ```
 checkpoints/
   ├── control_sd21_ini.ckpt
-  └── ccg_controlnet_sd21.ckpt
+  └── ccg_controlnet_sd21.safetensors
 ```
 
 Integrity (SHA-256):
 
 ```
-ccg_controlnet_sd21.ckpt  96dbd1633a66b0c10e14815c53820359169dc3a330b87fd5bfd0efd371373ac2
+ccg_controlnet_sd21.safetensors  d43972e0ad7390c7b7725d1f352315954b56f550f74ae9102b0dc3db2fc880e2
 ```
 
 ---
@@ -90,7 +90,7 @@ For quickly inspecting how the generator behaves on a few real test-set masks, u
 python run_inference.py
 ```
 
-By default it loads `checkpoints/ccg_controlnet_sd21.ckpt`, picks 3 cases from the test set, and writes one `[real fundus | cup/disc mask | generated]` triptych per case to `gen_out/` — purely for human review, **not** consumed by training.
+By default it loads `checkpoints/ccg_controlnet_sd21.safetensors`, picks 3 cases from the test set, and writes one `[real fundus | cup/disc mask | generated]` triptych per case to `gen_out/` — purely for human review, **not** consumed by training.
 
 Override the defaults via positional arguments:
 
